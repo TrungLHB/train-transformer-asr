@@ -1,0 +1,70 @@
+# Base configuration shared by all training runs
+
+# Audio feature extraction
+audio:
+  sample_rate: 16000
+  n_mels: 80
+  n_fft: 512
+  hop_length: 160        # 10ms at 16kHz
+  win_length: 400        # 25ms at 16kHz
+  f_min: 80.0
+  f_max: 7600.0
+  max_duration: 30.0     # seconds; clips longer than this are discarded
+  min_duration: 0.5      # seconds; clips shorter than this are discarded
+
+# SpecAugment data augmentation
+spec_augment:
+  freq_mask_param: 27    # F parameter (max frequency mask width)
+  time_mask_param: 100   # T parameter (max time mask width)
+  num_freq_masks: 2
+  num_time_masks: 2
+
+# Encoder (Conformer/Transformer)
+encoder:
+  d_model: 256
+  num_heads: 4
+  num_layers: 6
+  ff_dim: 2048
+  dropout: 0.1
+  conv_kernel_size: 31   # used only when encoder_type=conformer
+  encoder_type: conformer  # "transformer" or "conformer"
+
+# Dataset
+data:
+  dataset_name: mozilla-foundation/common_voice_13_0
+  language: "cy"         # Welsh – a low-resource language included in CommonVoice
+  train_split: "train"
+  valid_split: "validation"
+  test_split: "test"
+  data_dir: "./data"
+  num_workers: 4
+  cache_dir: "./cache"
+
+# Tokenizer / vocabulary
+tokenizer:
+  type: "char"           # "char" or "bpe"
+  vocab_size: 100        # used only when type=bpe
+  blank_id: 0            # CTC blank token id
+
+# Training
+training:
+  seed: 42
+  batch_size: 16
+  grad_accumulation_steps: 4
+  max_epochs: 100
+  learning_rate: 1.0e-3
+  warmup_steps: 4000
+  weight_decay: 1.0e-6
+  clip_grad_norm: 1.0
+  early_stopping_patience: 10
+  checkpoint_dir: "./checkpoints"
+  log_dir: "./logs"
+  log_interval: 50       # log every N steps
+  eval_interval: 1       # evaluate every N epochs
+  save_best_only: true
+
+# Hardware
+hardware:
+  device: "cuda"         # "cuda" or "cpu"
+  fp16: true             # mixed-precision training
+  distributed: false
