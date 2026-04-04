@@ -119,7 +119,7 @@ class ASRDataset(Dataset):
 
     Expects each example to have at minimum:
         - ``audio``   : dict with ``array`` (numpy) and ``sampling_rate``.
-        - ``sentence``: raw transcript string.
+        - a transcript field (configurable, defaults to ``sentence``).
 
     Args:
         hf_dataset: A Hugging Face ``datasets.Dataset`` object.
@@ -142,6 +142,7 @@ class ASRDataset(Dataset):
         max_duration: float = 30.0,
         min_duration: float = 0.5,
         normalize_text: bool = True,
+        transcript_field: str = "sentence",
     ) -> None:
         self.tokenizer = tokenizer
         self.feature_extractor = feature_extractor
@@ -150,6 +151,7 @@ class ASRDataset(Dataset):
         self.max_duration = max_duration
         self.min_duration = min_duration
         self.normalize_text = normalize_text
+        self.transcript_field = transcript_field
 
         # Filter by duration up-front so __len__ is accurate
         sample_rate = 16000  # expected after resampling
@@ -190,7 +192,7 @@ class ASRDataset(Dataset):
             features = self.spec_augment(features.unsqueeze(0)).squeeze(0)
 
         # Tokenise transcript
-        transcript = example.get("sentence", "")
+        transcript = example.get(self.transcript_field, "")
         if self.normalize_text:
             transcript = normalize_transcript(transcript)
         token_ids = self.tokenizer.encode(transcript)
@@ -239,6 +241,8 @@ def build_dataloaders(cfg, tokenizer: CharTokenizer):
         trust_remote_code=True,
     )
 
+    transcript_field = getattr(data_cfg, "transcript_field", "sentence")
+
     def _make(split, augment):
         return ASRDataset(
             hf_dataset=dataset[split],
@@ -248,6 +252,7 @@ def build_dataloaders(cfg, tokenizer: CharTokenizer):
             spec_augment=aug if augment else None,
             max_duration=audio_cfg.max_duration,
             min_duration=audio_cfg.min_duration,
+            transcript_field=transcript_field,
         )
 
     train_ds = _make(data_cfg.train_split, augment=True)

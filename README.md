@@ -87,7 +87,7 @@ Key settings in `configs/base_config.yaml`:
 |---------|-----|---------|-------------|
 | `audio` | `sample_rate` | 16000 | Audio sample rate |
 | `audio` | `n_mels` | 80 | Mel filterbank channels |
-| `data` | `language` | `cy` | CommonVoice language code (Welsh) |
+| `data` | `language` | `cy_gb` | FLEURS locale code (Welsh) |
 | `encoder` | `encoder_type` | `conformer` | `conformer` or `transformer` |
 | `encoder` | `d_model` | 256 | Model dimension |
 | `training` | `batch_size` | 16 | Batch size per device |
@@ -103,7 +103,7 @@ Key settings in `configs/base_config.yaml`:
 ```bash
 python scripts/train_ctc.py \
     --config configs/ctc_config.yaml \
-    --language cy \
+    --language cy_gb \
     --checkpoint_dir ./checkpoints/ctc_welsh
 ```
 
@@ -112,7 +112,7 @@ python scripts/train_ctc.py \
 ```bash
 python scripts/train_transformer.py \
     --config configs/transformer_config.yaml \
-    --language cy \
+    --language cy_gb \
     --checkpoint_dir ./checkpoints/transformer_welsh
 ```
 
@@ -131,7 +131,7 @@ python scripts/evaluate.py \
     --checkpoint checkpoints/ctc_welsh/best_model.pt \
     --config configs/ctc_config.yaml \
     --vocab_file checkpoints/ctc_welsh/vocab.txt \
-    --language cy \
+    --language cy_gb \
     --output results/ctc_welsh_test.txt
 ```
 
@@ -200,7 +200,7 @@ python cloud/azure/aml_job.py \
 
 ## Dataset
 
-By default the scripts use [Common Voice 13](https://huggingface.co/datasets/mozilla-foundation/common_voice_13_0) (**Welsh / cy**) as a low-resource language example. Change `--language` to any [CommonVoice language code](https://commonvoice.mozilla.org/en/languages) (e.g. `br` for Breton, `rm-sursilv` for Romansh).
+By default the scripts use [Google FLEURS](https://huggingface.co/datasets/google/fleurs) (**Welsh / cy_gb**) as a low-resource language example. Change `--language` to any [FLEURS locale code](https://huggingface.co/datasets/google/fleurs#data-splits) (e.g. `af_za` for Afrikaans, `hi_in` for Hindi). To use a different HuggingFace dataset, update `dataset_name` and `transcript_field` in the config.
 
 The dataset is downloaded automatically via the Hugging Face `datasets` library on first run.
 

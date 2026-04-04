@@ -8,7 +8,7 @@ Usage::
         [--language cy] \\
         [--checkpoint_dir ./checkpoints/transformer]
 
-The script loads Common Voice (or any HuggingFace dataset), builds a
+The script loads a HuggingFace ASR dataset (default: Google FLEURS), builds a
 character-level tokeniser, and trains a Conformer encoder + Transformer
 decoder model.  Training progress is logged to TensorBoard.
 """
@@ -101,8 +101,9 @@ def main():
             cache_dir=cfg.data.cache_dir,
             trust_remote_code=True,
         )
+        transcript_field = getattr(cfg.data, "transcript_field", "sentence")
         all_texts = [
-            ex["sentence"]
+            ex[transcript_field]
             for split in [cfg.data.train_split, cfg.data.valid_split]
             for ex in raw[split]
         ]

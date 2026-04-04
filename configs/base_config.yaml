@@ -31,8 +31,9 @@ encoder:
 
 # Dataset
 data:
-  dataset_name: mozilla-foundation/common_voice_13_0
-  language: "cy"         # Welsh – a low-resource language included in CommonVoice
+  dataset_name: google/fleurs
+  language: "cy_gb"       # Welsh – FLEURS locale code
+  transcript_field: "transcription"  # field name containing the transcript
   train_split: "train"
   valid_split: "validation"
   test_split: "test"
