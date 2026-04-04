@@ -15,6 +15,13 @@ from ..models.asr_model import CTCASRModel, TransformerASRModel
 from ..data.dataset import CharTokenizer
 from .metrics import compute_cer, compute_wer
 
+from ..utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+# Number of ref/hyp sample pairs to print after each validation pass
+_NUM_SAMPLES_TO_SHOW = 3
+
 
 # ---------------------------------------------------------------------------
 # Learning-rate schedule: Transformer warmup (Vaswani et al., 2017)
@@ -37,6 +44,26 @@ def get_transformer_lr_scheduler(
 
 
 # ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _vram_gb() -> Optional[float]:
+    """Return current GPU memory allocated in GB, or None if not on CUDA."""
+    if torch.cuda.is_available():
+        return torch.cuda.memory_allocated() / 1024 ** 3
+    return None
+
+
+def _fmt_vram() -> str:
+    v = _vram_gb()
+    return f"{v:.2f} GB" if v is not None else "N/A"
+
+
+def _separator(char: str = "─", width: int = 72) -> str:
+    return char * width
+
+
+# ---------------------------------------------------------------------------
 # Trainer
 # ---------------------------------------------------------------------------
 
@@ -46,7 +73,7 @@ class Trainer:
     Args:
         model:       An :class:`~src.models.asr_model.CTCASRModel` or
                      :class:`~src.models.asr_model.TransformerASRModel`.
-        tokenizer:   A :class:`~src.data.dataset.CharTokenizer`.
+        tokenizer:   A :class:`~src.data.dataset.CharTokenizer`.\
         cfg:         OmegaConf DictConfig (see ``configs/base_config.yaml``).
         train_loader: Training DataLoader.
         valid_loader: Validation DataLoader.
@@ -92,6 +119,9 @@ class Trainer:
         self.best_valid_wer = float("inf")
         self.early_stop_counter = 0
 
+        # History for end-of-training summary
+        self._history: list[dict] = []
+
         # Loss functions
         if self.is_ctc:
             self.ctc_loss_fn = nn.CTCLoss(
@@ -110,7 +140,8 @@ class Trainer:
     # Training step
     # ------------------------------------------------------------------
 
-    def _train_step(self, batch) -> float:
+    def _train_step(self, batch) -> tuple[float, float]:
+        """Returns (loss, grad_norm)."""
         features, feature_lens, tokens, token_lens = batch
         features = features.to(self.device)
         feature_lens = feature_lens.to(self.device)
@@ -124,30 +155,28 @@ class Trainer:
                 log_probs, enc_lens = self.model(features, feature_lens)
                 loss = self.ctc_loss_fn(log_probs, tokens, enc_lens, token_lens)
             else:
-                # targets for teacher forcing: prepend <sos>
                 sos = torch.full(
                     (tokens.size(0), 1), self.tokenizer.sos_id,
                     dtype=torch.long, device=self.device
                 )
                 decoder_input = torch.cat([sos, tokens[:, :-1]], dim=1)
-                target_lens_in = token_lens  # includes <sos>
+                target_lens_in = token_lens
 
                 logits = self.model(features, decoder_input, feature_lens, target_lens_in)
-                # Shift: compare logits at t with tokens at t+1
                 logits_flat = logits.reshape(-1, logits.size(-1))
                 targets_flat = tokens.reshape(-1)
                 loss = self.ce_loss_fn(logits_flat, targets_flat)
 
         self.scaler.scale(loss).backward()
         self.scaler.unscale_(self.optimizer)
-        nn.utils.clip_grad_norm_(
+        grad_norm = nn.utils.clip_grad_norm_(
             self.model.parameters(), self.cfg.training.clip_grad_norm
-        )
+        ).item()
         self.scaler.step(self.optimizer)
         self.scaler.update()
         self.scheduler.step()
 
-        return loss.item()
+        return loss.item(), grad_norm
 
     # ------------------------------------------------------------------
     # Evaluation
@@ -170,7 +199,6 @@ class Trainer:
                 log_probs, enc_lens = self.model(features, feature_lens)
                 loss = self.ctc_loss_fn(log_probs, tokens, enc_lens, token_lens)
                 total_loss += loss.item()
-
                 hyp_ids_list = self.model.decode(features, feature_lens, beam_size=10)
             else:
                 sos = torch.full(
@@ -183,7 +211,6 @@ class Trainer:
                 targets_flat = tokens.reshape(-1)
                 loss = self.ce_loss_fn(logits_flat, targets_flat)
                 total_loss += loss.item()
-
                 hyp_ids_list = self.model.decode(features, feature_lens, beam_size=5)
 
             for b in range(tokens.size(0)):
@@ -199,7 +226,13 @@ class Trainer:
         char_err = compute_cer(all_refs, all_hyps)
 
         self.model.train()
-        return {"loss": avg_loss, "wer": word_err, "cer": char_err}
+        return {
+            "loss": avg_loss,
+            "wer": word_err,
+            "cer": char_err,
+            "refs": all_refs,
+            "hyps": all_hyps,
+        }
 
     # ------------------------------------------------------------------
     # Main training loop
@@ -207,45 +240,98 @@ class Trainer:
 
     def train(self) -> None:
         tcfg = self.cfg.training
+        model_type = "CTC" if self.is_ctc else "Transformer"
+        n_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+
+        # ── Startup banner ────────────────────────────────────────────────
+        logger.info(_separator("═"))
+        logger.info("  ASR Training  │  decoder=%s  │  params=%s  │  device=%s",
+                    model_type, f"{n_params:,}", self.device)
+        logger.info("  Train batches: %d  │  Valid batches: %d  │  Max epochs: %d",
+                    len(self.train_loader), len(self.valid_loader), tcfg.max_epochs)
+        logger.info("  Effective batch size: %d  │  FP16: %s  │  VRAM: %s",
+                    tcfg.batch_size * tcfg.grad_accumulation_steps,
+                    self.cfg.hardware.fp16, _fmt_vram())
+        logger.info(_separator("═"))
+
         self.model.train()
 
         for epoch in range(1, tcfg.max_epochs + 1):
             epoch_loss = 0.0
+            epoch_grad_norm = 0.0
             t0 = time.time()
+            num_steps = len(self.train_loader)
+
+            # ── Epoch header ──────────────────────────────────────────────
+            logger.info(_separator())
+            logger.info("  Epoch %d / %d", epoch, tcfg.max_epochs)
+            logger.info(_separator())
 
             for step, batch in enumerate(self.train_loader, 1):
-                loss = self._train_step(batch)
+                loss, grad_norm = self._train_step(batch)
                 epoch_loss += loss
+                epoch_grad_norm += grad_norm
                 self.global_step += 1
 
                 if self.global_step % tcfg.log_interval == 0:
                     lr = self.scheduler.get_last_lr()[0]
+                    elapsed_step = time.time() - t0
+                    steps_per_sec = step / elapsed_step
+                    eta_sec = (num_steps - step) / max(steps_per_sec, 1e-6)
+
+                    logger.info(
+                        "  step %4d/%d │ loss=%.4f │ grad_norm=%.3f │ "
+                        "lr=%.2e │ %.1f steps/s │ ETA %ds │ VRAM %s",
+                        step, num_steps, loss, grad_norm,
+                        lr, steps_per_sec, int(eta_sec), _fmt_vram(),
+                    )
+
                     self.writer.add_scalar("train/loss", loss, self.global_step)
                     self.writer.add_scalar("train/lr", lr, self.global_step)
+                    self.writer.add_scalar("train/grad_norm", grad_norm, self.global_step)
 
-            avg_epoch_loss = epoch_loss / max(len(self.train_loader), 1)
+            avg_epoch_loss = epoch_loss / max(num_steps, 1)
+            avg_grad_norm = epoch_grad_norm / max(num_steps, 1)
             elapsed = time.time() - t0
 
+            logger.info(
+                "  ─ Epoch %d done │ avg_loss=%.4f │ avg_grad_norm=%.3f │ %.1fs",
+                epoch, avg_epoch_loss, avg_grad_norm, elapsed,
+            )
+
+            # ── Validation ────────────────────────────────────────────────
             if epoch % tcfg.eval_interval == 0:
+                logger.info("  Evaluating …")
+                t_val = time.time()
                 metrics = self.evaluate()
+                val_elapsed = time.time() - t_val
+
                 wer_val = metrics["wer"]
                 cer_val = metrics["cer"]
                 val_loss = metrics["loss"]
+                wer_delta = wer_val - self.best_valid_wer  # negative = improvement
 
                 self.writer.add_scalar("valid/loss", val_loss, epoch)
                 self.writer.add_scalar("valid/wer", wer_val, epoch)
                 self.writer.add_scalar("valid/cer", cer_val, epoch)
 
-                print(
-                    f"Epoch {epoch:03d} | "
-                    f"train_loss={avg_epoch_loss:.4f} | "
-                    f"val_loss={val_loss:.4f} | "
-                    f"WER={wer_val:.4f} | "
-                    f"CER={cer_val:.4f} | "
-                    f"elapsed={elapsed:.1f}s"
+                logger.info(_separator("·"))
+                logger.info(
+                    "  Validation │ loss=%.4f │ WER=%.4f (%s) │ CER=%.4f │ %.1fs",
+                    val_loss, wer_val,
+                    f"{wer_delta:+.4f}" if self.best_valid_wer < float("inf") else "first",
+                    cer_val, val_elapsed,
                 )
 
-                # Save best checkpoint
+                # ── Sample predictions ────────────────────────────────────
+                logger.info("  Sample predictions:")
+                refs, hyps = metrics["refs"], metrics["hyps"]
+                for i in range(min(_NUM_SAMPLES_TO_SHOW, len(refs))):
+                    logger.info("    [%d] REF: %s", i + 1, refs[i] or "<empty>")
+                    logger.info("        HYP: %s", hyps[i] or "<empty>")
+                logger.info(_separator("·"))
+
+                # ── Checkpoint & early stopping ───────────────────────────
                 ckpt_dir = tcfg.checkpoint_dir
                 if wer_val < self.best_valid_wer:
                     self.best_valid_wer = wer_val
@@ -262,9 +348,14 @@ class Trainer:
                         },
                         ckpt_path,
                     )
-                    print(f"  ✓ Best checkpoint saved to {ckpt_path}")
+                    logger.info("  ✓ New best WER=%.4f  →  saved to %s", wer_val, ckpt_path)
                 else:
                     self.early_stop_counter += 1
+                    patience_left = tcfg.early_stopping_patience - self.early_stop_counter
+                    logger.info(
+                        "  ✗ No improvement  (patience %d/%d, %d left)",
+                        self.early_stop_counter, tcfg.early_stopping_patience, patience_left,
+                    )
                     if not tcfg.save_best_only:
                         ckpt_path = os.path.join(ckpt_dir, f"epoch_{epoch:03d}.pt")
                         torch.save(
@@ -280,17 +371,42 @@ class Trainer:
                         )
 
                     if self.early_stop_counter >= tcfg.early_stopping_patience:
-                        print(
-                            f"Early stopping triggered after {epoch} epochs "
-                            f"(no improvement for {tcfg.early_stopping_patience} epochs)."
+                        logger.info(
+                            "  Early stopping triggered at epoch %d "
+                            "(no improvement for %d epochs).",
+                            epoch, tcfg.early_stopping_patience,
                         )
+                        self._history.append({
+                            "epoch": epoch, "train_loss": avg_epoch_loss,
+                            "val_loss": val_loss, "wer": wer_val, "cer": cer_val,
+                        })
                         break
-            else:
-                print(
-                    f"Epoch {epoch:03d} | "
-                    f"train_loss={avg_epoch_loss:.4f} | "
-                    f"elapsed={elapsed:.1f}s"
-                )
 
+                self._history.append({
+                    "epoch": epoch, "train_loss": avg_epoch_loss,
+                    "val_loss": val_loss, "wer": wer_val, "cer": cer_val,
+                })
+            else:
+                self._history.append({
+                    "epoch": epoch, "train_loss": avg_epoch_loss,
+                    "val_loss": None, "wer": None, "cer": None,
+                })
+
+        # ── End-of-training summary ───────────────────────────────────────
         self.writer.close()
-        print("Training complete. Best WER:", self.best_valid_wer)
+        logger.info(_separator("═"))
+        logger.info("  Training complete  │  Best WER: %.4f", self.best_valid_wer)
+        logger.info(_separator())
+
+        eval_rows = [r for r in self._history if r["wer"] is not None]
+        if eval_rows:
+            logger.info("  %-6s  %-12s  %-12s  %-10s  %-10s", "Epoch", "Train Loss", "Val Loss", "WER", "CER")
+            logger.info("  " + "─" * 56)
+            for r in eval_rows:
+                logger.info(
+                    "  %-6d  %-12.4f  %-12.4f  %-10.4f  %-10.4f",
+                    r["epoch"], r["train_loss"], r["val_loss"], r["wer"], r["cer"],
+                )
+        logger.info(_separator("═"))
+
+
