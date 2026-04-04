@@ -21,10 +21,10 @@ spec_augment:
 
 # Encoder (Conformer/Transformer)
 encoder:
-  d_model: 256
-  num_heads: 4
-  num_layers: 6
-  ff_dim: 2048
+  d_model: 128           # reduced from 256 → ~3M params vs ~12M
+  num_heads: 4           # 128/4 = 32 dims per head
+  num_layers: 4          # reduced from 6
+  ff_dim: 512            # reduced from 2048
   dropout: 0.1
   conv_kernel_size: 31   # used only when encoder_type=conformer
   encoder_type: conformer  # "transformer" or "conformer"
@@ -38,7 +38,7 @@ data:
   valid_split: "validation"
   test_split: "test"
   data_dir: "./data"
-  num_workers: 4
+  num_workers: 2         # Colab VMs have ~2 usable CPUs
   cache_dir: "./cache"
 
 # Tokenizer / vocabulary
@@ -47,17 +47,17 @@ tokenizer:
   vocab_size: 100        # used only when type=bpe
   blank_id: 0            # CTC blank token id
 
-# Training
+# Training  (tuned for Colab T4, effective batch = 8 × 8 = 64)
 training:
   seed: 42
-  batch_size: 16
-  grad_accumulation_steps: 4
-  max_epochs: 100
+  batch_size: 8          # T4-safe; raise to 16 if no OOM
+  grad_accumulation_steps: 8   # keeps effective batch at 64
+  max_epochs: 50         # FLEURS Welsh converges well before 100
   learning_rate: 1.0e-3
-  warmup_steps: 4000
+  warmup_steps: 2000     # shorter warmup for smaller dataset
   weight_decay: 1.0e-6
   clip_grad_norm: 1.0
-  early_stopping_patience: 10
+  early_stopping_patience: 5   # avoid wasting Colab session time
   checkpoint_dir: "./checkpoints"
   log_dir: "./logs"
   log_interval: 50       # log every N steps
@@ -67,5 +67,5 @@ training:
 # Hardware
 hardware:
   device: "cuda"         # "cuda" or "cpu"
-  fp16: true             # mixed-precision training
+  fp16: true             # T4 Tensor Cores: always keep ON
   distributed: false

@@ -6,10 +6,10 @@ defaults:
 
 decoder:
   type: transformer
-  d_model: 256
-  num_heads: 4
-  num_layers: 6
-  ff_dim: 2048
+  d_model: 128           # must match encoder d_model
+  num_heads: 4           # 128/4 = 32 dims per head
+  num_layers: 4          # reduced from 6
+  ff_dim: 512            # reduced from 2048
   dropout: 0.1
   max_target_length: 200  # maximum number of output tokens
 
