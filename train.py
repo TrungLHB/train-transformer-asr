@@ -81,15 +81,17 @@ def evaluate(model, val_loader, tokenizer, device, cfg, epoch: int) -> dict:
                 all_hyps_attn.append(tokenizer.decode(hyp_a, skip_special_tokens=True))
                 all_hyps_ctc.append(tokenizer.decode(hyp_c, skip_special_tokens=True))
 
-            # Collect audio samples for the first batch only
+            # Collect audio samples until we have enough
             if len(audio_samples) < cfg.wandb.log_audio_samples:
-                for i in range(min(cfg.wandb.log_audio_samples - len(audio_samples), len(batch["texts"]))):
+                batch_start = len(all_hyps_attn) - len(batch["texts"])
+                n_to_collect = min(cfg.wandb.log_audio_samples - len(audio_samples), len(batch["texts"]))
+                for i in range(n_to_collect):
                     audio_samples.append(
                         {
                             "audio": batch["audios"][i].numpy(),
                             "reference": batch["texts"][i],
-                            "hypothesis_attn": all_hyps_attn[-(len(batch["texts"]) - i)],
-                            "hypothesis_ctc": all_hyps_ctc[-(len(batch["texts"]) - i)],
+                            "hypothesis_attn": all_hyps_attn[batch_start + i],
+                            "hypothesis_ctc": all_hyps_ctc[batch_start + i],
                         }
                     )
 
@@ -297,7 +299,7 @@ SWEEP_CONFIG = {
         "model.n_heads": {"values": [4, 8]},
         "model.num_encoder_layers": {"values": [4, 6, 8]},
         "model.ctc_weight": {"distribution": "uniform", "min": 0.1, "max": 0.5},
-        "training.dropout": {"distribution": "uniform", "min": 0.0, "max": 0.3},
+        "model.dropout": {"distribution": "uniform", "min": 0.0, "max": 0.3},
     },
 }
 
