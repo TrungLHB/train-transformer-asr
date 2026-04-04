@@ -1,0 +1,23 @@
+# Transformer (attention-based autoregressive) decoder configuration
+# Extends base_config.yaml
+
+defaults:
+  - base_config
+
+decoder:
+  type: transformer
+  d_model: 256
+  num_heads: 4
+  num_layers: 6
+  ff_dim: 2048
+  dropout: 0.1
+  max_target_length: 200  # maximum number of output tokens
+
+  # Beam search inference settings
+  beam_size: 5
+  length_penalty: 1.0
+  eos_id: 1
+  sos_id: 2
+
+training:
+  decoder_loss_weight: 1.0  # weight for cross-entropy loss

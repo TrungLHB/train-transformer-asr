@@ -1,0 +1,18 @@
+# CTC decoder configuration
+# Extends base_config.yaml
+
+defaults:
+  - base_config
+
+decoder:
+  type: ctc
+  # CTC projects encoder output directly to vocabulary logits
+  blank_id: 0
+
+  # Beam search / prefix beam search settings
+  beam_size: 10
+  lm_weight: 0.3         # language model weight during decoding
+  word_score: -1.0       # word insertion score
+
+training:
+  ctc_loss_weight: 1.0   # weight for CTC loss
