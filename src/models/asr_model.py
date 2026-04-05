@@ -93,6 +93,8 @@ class CTCASRModel(nn.Module):
             List of B lists of predicted token ids.
         """
         enc_out, enc_lens = self.encoder(features, feature_lens)
+        if beam_size == 1:
+            return self.ctc_decoder.greedy_decode(enc_out, enc_lens)
         return self.ctc_decoder.prefix_beam_search(enc_out, enc_lens, beam_size)
 
 

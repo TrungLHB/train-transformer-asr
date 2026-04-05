@@ -211,37 +211,40 @@ class Trainer:
         total_loss = 0.0
         all_refs, all_hyps = [], []
 
-        for batch in self.valid_loader:
-            features, feature_lens, tokens, token_lens = batch
-            features = features.to(self.device)
-            feature_lens = feature_lens.to(self.device)
-            tokens = tokens.to(self.device)
-            token_lens = token_lens.to(self.device)
+        with autocast(enabled=self.cfg.hardware.fp16 and self.device.type == "cuda"):
+            for batch in self.valid_loader:
+                features, feature_lens, tokens, token_lens = batch
+                features = features.to(self.device)
+                feature_lens = feature_lens.to(self.device)
+                tokens = tokens.to(self.device)
+                token_lens = token_lens.to(self.device)
 
-            if self.is_ctc:
-                log_probs, enc_lens = self.model(features, feature_lens)
-                loss = self.ctc_loss_fn(log_probs, tokens, enc_lens, token_lens)
-                total_loss += loss.item()
-                hyp_ids_list = self.model.decode(features, feature_lens, beam_size=10)
-            else:
-                sos = torch.full(
-                    (tokens.size(0), 1), self.tokenizer.sos_id,
-                    dtype=torch.long, device=self.device
-                )
-                decoder_input = torch.cat([sos, tokens[:, :-1]], dim=1)
-                logits = self.model(features, decoder_input, feature_lens, token_lens)
-                logits_flat = logits.reshape(-1, logits.size(-1))
-                targets_flat = tokens.reshape(-1)
-                loss = self.ce_loss_fn(logits_flat, targets_flat)
-                total_loss += loss.item()
-                hyp_ids_list = self.model.decode(features, feature_lens, beam_size=5)
+                if self.is_ctc:
+                    log_probs, enc_lens = self.model(features, feature_lens)
+                    loss = self.ctc_loss_fn(log_probs, tokens, enc_lens, token_lens)
+                    total_loss += loss.item()
+                    # Using beam_size=1 triggers near-instant GPU greedy decoding
+                    hyp_ids_list = self.model.decode(features, feature_lens, beam_size=1)
+                else:
+                    sos = torch.full(
+                        (tokens.size(0), 1), self.tokenizer.sos_id,
+                        dtype=torch.long, device=self.device
+                    )
+                    decoder_input = torch.cat([sos, tokens[:, :-1]], dim=1)
+                    logits = self.model(features, decoder_input, feature_lens, token_lens)
+                    logits_flat = logits.reshape(-1, logits.size(-1))
+                    targets_flat = tokens.reshape(-1)
+                    loss = self.ce_loss_fn(logits_flat, targets_flat)
+                    total_loss += loss.item()
+                    # beam_size=1 makes autoregressive generation much faster
+                    hyp_ids_list = self.model.decode(features, feature_lens, beam_size=1)
 
-            for b in range(tokens.size(0)):
-                ref_ids = tokens[b, : token_lens[b]].tolist()
-                ref_text = self.tokenizer.decode(ref_ids)
-                hyp_text = self.tokenizer.decode(hyp_ids_list[b])
-                all_refs.append(ref_text)
-                all_hyps.append(hyp_text)
+                for b in range(tokens.size(0)):
+                    ref_ids = tokens[b, : token_lens[b]].tolist()
+                    ref_text = self.tokenizer.decode(ref_ids)
+                    hyp_text = self.tokenizer.decode(hyp_ids_list[b])
+                    all_refs.append(ref_text)
+                    all_hyps.append(hyp_text)
 
         n = max(len(self.valid_loader), 1)
         avg_loss = total_loss / n
