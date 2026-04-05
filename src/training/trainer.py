@@ -421,6 +421,11 @@ class Trainer:
                                 metadata={"epoch": epoch, "val_loss": val_loss, "wer": wer_val, "cer": cer_val},
                             )
                             artifact.add_file(ckpt_path)
+                            # Also package the vocabulary file with the model!
+                            vocab_path = os.path.join(ckpt_dir, "vocab.txt")
+                            if os.path.exists(vocab_path):
+                                artifact.add_file(vocab_path)
+                            
                             wandb.log_artifact(artifact)
                 else:
                     self.early_stop_counter += 1
