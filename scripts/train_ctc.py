@@ -43,6 +43,8 @@ def parse_args():
     parser.add_argument("--language", default=None, help="Override dataset language code")
     parser.add_argument("--checkpoint_dir", default=None, help="Override checkpoint directory")
     parser.add_argument("--log_dir", default=None, help="Override TensorBoard log directory")
+    parser.add_argument("--data_dir", default=None, help="Override data directory")
+    parser.add_argument("--cache_dir", default=None, help="Override dataset cache directory")
     parser.add_argument("--epochs", type=int, default=None, help="Override max training epochs")
     parser.add_argument("--batch_size", type=int, default=None, help="Override batch size")
     parser.add_argument("--vocab_file", default=None, help="Path to pre-built vocab file")
@@ -70,6 +72,10 @@ def main():
         cfg.training.checkpoint_dir = args.checkpoint_dir
     if args.log_dir:
         cfg.training.log_dir = args.log_dir
+    if args.data_dir:
+        cfg.data.data_dir = args.data_dir
+    if args.cache_dir:
+        cfg.data.cache_dir = args.cache_dir
     if args.epochs:
         cfg.training.max_epochs = args.epochs
     if args.batch_size:

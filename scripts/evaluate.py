@@ -46,6 +46,8 @@ def parse_args():
         "--vocab_file", required=True, help="Path to vocabulary file (vocab.txt)"
     )
     parser.add_argument("--language", default=None, help="Override dataset language code")
+    parser.add_argument("--data_dir", default=None, help="Override data directory")
+    parser.add_argument("--cache_dir", default=None, help="Override dataset cache directory")
     parser.add_argument("--split", default="test", help="Dataset split to evaluate on")
     parser.add_argument("--beam_size", type=int, default=None, help="Override beam size")
     parser.add_argument("--batch_size", type=int, default=8, help="Evaluation batch size")
@@ -64,6 +66,10 @@ def main():
 
     if args.language:
         cfg.data.language = args.language
+    if args.data_dir:
+        cfg.data.data_dir = args.data_dir
+    if args.cache_dir:
+        cfg.data.cache_dir = args.cache_dir
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
