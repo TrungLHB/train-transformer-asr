@@ -14,7 +14,7 @@ decoder:
   max_target_length: 200  # maximum number of output tokens
 
   # Beam search inference settings
-  beam_size: 5
+  beam_size: 1
   length_penalty: 1.0
   eos_id: 1
   sos_id: 2

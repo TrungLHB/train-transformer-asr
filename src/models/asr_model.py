@@ -207,6 +207,11 @@ class TransformerASRModel(nn.Module):
             List of B lists of predicted token ids.
         """
         enc_out, enc_lens = self.encoder(features, feature_lens)
+        
+        if beam_size == 1:
+            mem_mask = self._make_memory_padding_mask(enc_lens, enc_out.size(1))
+            return self.decoder.batched_greedy_decode(enc_out, mem_mask)
+
         results = []
         for b in range(enc_out.size(0)):
             mem = enc_out[b : b + 1]

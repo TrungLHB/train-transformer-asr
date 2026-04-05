@@ -232,3 +232,35 @@ class TransformerDecoder(nn.Module):
         if best_ids and best_ids[-1] == self.eos_id:
             best_ids = best_ids[:-1]
         return best_ids
+
+    @torch.no_grad()
+    def batched_greedy_decode(
+        self,
+        memory: torch.Tensor,
+        memory_key_padding_mask: Optional[torch.Tensor] = None,
+    ) -> List[List[int]]:
+        """Fast batched greedy decoding without beam branching."""
+        B = memory.size(0)
+        device = memory.device
+        
+        # Start with <sos> for all sequences in batch
+        tgt = torch.full((B, 1), self.sos_id, dtype=torch.long, device=device)
+        finished = torch.zeros(B, dtype=torch.bool, device=device)
+
+        for _ in range(self.max_target_length):
+            logits = self.forward(tgt, memory, memory_key_padding_mask=memory_key_padding_mask)
+            next_toks = logits[:, -1, :].argmax(dim=-1, keepdim=True)
+            tgt = torch.cat([tgt, next_toks], dim=1)
+
+            finished |= (next_toks.squeeze(1) == self.eos_id)
+            if finished.all():
+                break
+
+        results = []
+        for b in range(B):
+            row_ids = tgt[b, 1:].tolist()  # strip <sos>
+            if self.eos_id in row_ids:
+                row_ids = row_ids[:row_ids.index(self.eos_id)]
+            results.append(row_ids)
+            
+        return results
