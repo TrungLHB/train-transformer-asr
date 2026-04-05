@@ -11,6 +11,12 @@ from torch.cuda.amp import GradScaler, autocast
 from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.tensorboard import SummaryWriter
 
+try:
+    import wandb
+    _WANDB_AVAILABLE = True
+except ImportError:
+    _WANDB_AVAILABLE = False
+
 from ..models.asr_model import CTCASRModel, TransformerASRModel
 from ..data.dataset import CharTokenizer
 from .metrics import compute_cer, compute_wer
@@ -114,6 +120,23 @@ class Trainer:
 
         os.makedirs(tcfg.checkpoint_dir, exist_ok=True)
         self.writer = SummaryWriter(log_dir=tcfg.log_dir)
+
+        # ── Weights & Biases ──────────────────────────────────────────────
+        wcfg = getattr(cfg, "wandb", None)
+        self._wandb = wcfg is not None and getattr(wcfg, "enabled", False) and _WANDB_AVAILABLE
+        if self._wandb:
+            import omegaconf
+            wandb.init(
+                project=wcfg.project,
+                entity=(wcfg.entity if wcfg.entity else None),
+                name=(wcfg.run_name if wcfg.run_name else None),
+                tags=list(wcfg.tags) if wcfg.tags else [],
+                config=omegaconf.OmegaConf.to_container(cfg, resolve=True),
+            )
+            wandb.watch(self.model, log="gradients", log_freq=tcfg.log_interval)
+            logger.info("  W&B run: %s", wandb.run.url)
+        elif wcfg is not None and getattr(wcfg, "enabled", False):
+            logger.warning("  wandb not installed – W&B logging disabled. Run: pip install wandb")
 
         self.global_step = 0
         self.best_valid_wer = float("inf")
@@ -290,6 +313,14 @@ class Trainer:
                     self.writer.add_scalar("train/lr", lr, self.global_step)
                     self.writer.add_scalar("train/grad_norm", grad_norm, self.global_step)
 
+                    if getattr(self, "_wandb", False):
+                        wandb.log({
+                            "train/loss": loss,
+                            "train/lr": lr,
+                            "train/grad_norm": grad_norm,
+                            "train/vram_gb": _vram_gb() or 0.0,
+                        }, step=self.global_step)
+
             avg_epoch_loss = epoch_loss / max(num_steps, 1)
             avg_grad_norm = epoch_grad_norm / max(num_steps, 1)
             elapsed = time.time() - t0
@@ -298,6 +329,14 @@ class Trainer:
                 "  ─ Epoch %d done │ avg_loss=%.4f │ avg_grad_norm=%.3f │ %.1fs",
                 epoch, avg_epoch_loss, avg_grad_norm, elapsed,
             )
+
+            if getattr(self, "_wandb", False):
+                wandb.log({
+                    "epoch/train_loss": avg_epoch_loss,
+                    "epoch/avg_grad_norm": avg_grad_norm,
+                    "epoch/elapsed_s": elapsed,
+                    "epoch": epoch,
+                }, step=self.global_step)
 
             # ── Validation ────────────────────────────────────────────────
             if epoch % tcfg.eval_interval == 0:
@@ -315,6 +354,14 @@ class Trainer:
                 self.writer.add_scalar("valid/wer", wer_val, epoch)
                 self.writer.add_scalar("valid/cer", cer_val, epoch)
 
+                if getattr(self, "_wandb", False):
+                    wandb.log({
+                        "valid/loss": val_loss,
+                        "valid/wer": wer_val,
+                        "valid/cer": cer_val,
+                        "epoch": epoch,
+                    }, step=self.global_step)
+
                 logger.info(_separator("·"))
                 logger.info(
                     "  Validation │ loss=%.4f │ WER=%.4f (%s) │ CER=%.4f │ %.1fs",
@@ -326,6 +373,15 @@ class Trainer:
                 # ── Sample predictions ────────────────────────────────────
                 logger.info("  Sample predictions:")
                 refs, hyps = metrics["refs"], metrics["hyps"]
+                
+                if getattr(self, "_wandb", False):
+                    cols = ["ref", "hyp"]
+                    rows = [[refs[i] or "", hyps[i] or ""] for i in range(min(_NUM_SAMPLES_TO_SHOW, len(refs)))]
+                    wandb.log(
+                        {"valid/sample_predictions": wandb.Table(columns=cols, data=rows)},
+                        step=self.global_step,
+                    )
+                    
                 for i in range(min(_NUM_SAMPLES_TO_SHOW, len(refs))):
                     logger.info("    [%d] REF: %s", i + 1, refs[i] or "<empty>")
                     logger.info("        HYP: %s", hyps[i] or "<empty>")
@@ -349,6 +405,19 @@ class Trainer:
                         ckpt_path,
                     )
                     logger.info("  ✓ New best WER=%.4f  →  saved to %s", wer_val, ckpt_path)
+                    
+                    if getattr(self, "_wandb", False):
+                        wandb.run.summary["best_wer"] = wer_val
+                        wandb.run.summary["best_cer"] = cer_val
+                        wandb.run.summary["best_epoch"] = epoch
+                        if getattr(self.cfg.wandb, "log_model", False):
+                            artifact = wandb.Artifact(
+                                name=f"best_model-{wandb.run.id}",
+                                type="model",
+                                metadata={"epoch": epoch, "wer": wer_val, "cer": cer_val},
+                            )
+                            artifact.add_file(ckpt_path)
+                            wandb.log_artifact(artifact)
                 else:
                     self.early_stop_counter += 1
                     patience_left = tcfg.early_stopping_patience - self.early_stop_counter
@@ -408,5 +477,6 @@ class Trainer:
                     r["epoch"], r["train_loss"], r["val_loss"], r["wer"], r["cer"],
                 )
         logger.info(_separator("═"))
-
-
+        
+        if getattr(self, "_wandb", False):
+            wandb.finish()
