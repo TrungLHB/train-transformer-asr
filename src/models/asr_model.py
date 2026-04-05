@@ -134,8 +134,18 @@ class TransformerASRModel(nn.Module):
         sos_id: int = 2,
         eos_id: int = 1,
         max_target_length: int = 200,
+        ctc_weight: float = 0.0,
+        blank_id: int = 0,
     ) -> None:
         super().__init__()
+        self.ctc_weight = ctc_weight
+        if ctc_weight > 0.0:
+            self.ctc_decoder = CTCDecoder(
+                vocab_size=vocab_size,
+                d_model=d_model,
+                blank_id=blank_id,
+            )
+            
         self.encoder = ASREncoder(
             n_mels=n_mels,
             d_model=d_model,
@@ -182,11 +192,22 @@ class TransformerASRModel(nn.Module):
             target_lens:  (B,) target lengths (including <sos>).
 
         Returns:
-            logits: (B, U, vocab_size)
+            logits:        (B, U, vocab_size)
+            ctc_log_probs: (T', B, vocab_size) if ctc_weight > 0.0 else None
+            enc_lens:      (B,) encoder output lengths
         """
         enc_out, enc_lens = self.encoder(features, feature_lens)
+        
+        # CTC Branch
+        ctc_log_probs = None
+        if hasattr(self, "ctc_decoder") and self.ctc_weight > 0.0:
+            ctc_log_probs = self.ctc_decoder(enc_out)
+            
+        # Transformer Branch
         mem_mask = self._make_memory_padding_mask(enc_lens, enc_out.size(1))
-        return self.decoder(targets, enc_out, target_lens, mem_mask)
+        decoder_logits = self.decoder(targets, enc_out, target_lens, mem_mask)
+        
+        return decoder_logits, ctc_log_probs, enc_lens
 
     def decode(
         self,
@@ -265,6 +286,8 @@ def build_model(cfg, vocab_size: int) -> nn.Module:
             sos_id=dec.sos_id,
             eos_id=dec.eos_id,
             max_target_length=dec.max_target_length,
+            ctc_weight=getattr(dec, "ctc_weight", 0.0),
+            blank_id=getattr(dec, "blank_id", 0),
         )
     else:
         raise ValueError(f"Unknown decoder type: {dec.type!r}")

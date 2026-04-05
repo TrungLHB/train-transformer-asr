@@ -145,14 +145,19 @@ class Trainer:
         # History for end-of-training summary
         self._history: list[dict] = []
 
+        self.is_joint = False
+        if not self.is_ctc and hasattr(self.model, "ctc_weight") and self.model.ctc_weight > 0.0:
+            self.is_joint = True
+
         # Loss functions
-        if self.is_ctc:
+        if self.is_ctc or self.is_joint:
             self.ctc_loss_fn = nn.CTCLoss(
                 blank=tokenizer.blank_id,
                 reduction="mean",
                 zero_infinity=True,
             )
-        else:
+        
+        if not self.is_ctc:
             # Label smoothing cross-entropy
             self.ce_loss_fn = nn.CrossEntropyLoss(
                 ignore_index=tokenizer.blank_id,
@@ -209,6 +214,8 @@ class Trainer:
     def evaluate(self) -> dict:
         self.model.eval()
         total_loss = 0.0
+        total_loss_ce = 0.0
+        total_loss_ctc = 0.0
         all_refs, all_hyps = [], []
 
         with autocast(enabled=self.cfg.hardware.fp16 and self.device.type == "cuda"):
@@ -223,7 +230,6 @@ class Trainer:
                     log_probs, enc_lens = self.model(features, feature_lens)
                     loss = self.ctc_loss_fn(log_probs, tokens, enc_lens, token_lens)
                     total_loss += loss.item()
-                    # Using beam_size=1 triggers near-instant GPU greedy decoding
                     hyp_ids_list = self.model.decode(features, feature_lens, beam_size=1)
                 else:
                     B, max_len = tokens.size()
@@ -235,12 +241,21 @@ class Trainer:
                     sos = torch.full((B, 1), self.tokenizer.sos_id, dtype=torch.long, device=self.device)
                     decoder_input = torch.cat([sos, new_tokens[:, :-1]], dim=1)
                     
-                    logits = self.model(features, decoder_input, feature_lens, new_token_lens)
-                    logits_flat = logits.reshape(-1, logits.size(-1))
+                    decoder_logits, ctc_log_probs, enc_lens = self.model(features, decoder_input, feature_lens, new_token_lens)
+                    logits_flat = decoder_logits.reshape(-1, decoder_logits.size(-1))
                     targets_flat = new_tokens.reshape(-1)
-                    loss = self.ce_loss_fn(logits_flat, targets_flat)
+                    loss_ce = self.ce_loss_fn(logits_flat, targets_flat)
+                    
+                    if self.is_joint:
+                        loss_ctc = self.ctc_loss_fn(ctc_log_probs, tokens, enc_lens, token_lens)
+                        w = self.model.ctc_weight
+                        loss = (1 - w) * loss_ce + w * loss_ctc
+                        total_loss_ce += loss_ce.item()
+                        total_loss_ctc += loss_ctc.item()
+                    else:
+                        loss = loss_ce
+                        
                     total_loss += loss.item()
-                    # beam_size=1 makes autoregressive generation much faster
                     hyp_ids_list = self.model.decode(features, feature_lens, beam_size=1)
 
                 for b in range(tokens.size(0)):
@@ -251,18 +266,19 @@ class Trainer:
                     all_hyps.append(hyp_text)
 
         n = max(len(self.valid_loader), 1)
-        avg_loss = total_loss / n
-        word_err = compute_wer(all_refs, all_hyps)
-        char_err = compute_cer(all_refs, all_hyps)
-
-        self.model.train()
-        return {
-            "loss": avg_loss,
-            "wer": word_err,
-            "cer": char_err,
+        res = {
+            "loss": total_loss / n,
+            "wer": compute_wer(all_refs, all_hyps),
+            "cer": compute_cer(all_refs, all_hyps),
             "refs": all_refs,
             "hyps": all_hyps,
         }
+        if self.is_joint:
+            res["loss_ce"] = total_loss_ce / n
+            res["loss_ctc"] = total_loss_ctc / n
+            
+        self.model.train()
+        return res
 
     # ------------------------------------------------------------------
     # Main training loop
@@ -287,7 +303,7 @@ class Trainer:
         self.model.train()
 
         for epoch in range(1, tcfg.max_epochs + 1):
-            epoch_loss = 0.0
+            epoch_losses = {"total": 0.0, "ce": 0.0, "ctc": 0.0}
             epoch_grad_norm = 0.0
             t0 = time.time()
             num_steps = len(self.train_loader)
@@ -298,8 +314,10 @@ class Trainer:
             logger.info(_separator())
 
             for step, batch in enumerate(self.train_loader, 1):
-                loss, grad_norm = self._train_step(batch)
-                epoch_loss += loss
+                step_losses, grad_norm = self._train_step(batch)
+                epoch_losses["total"] += step_losses["total"]
+                epoch_losses["ce"] += step_losses["ce"]
+                epoch_losses["ctc"] += step_losses["ctc"]
                 epoch_grad_norm += grad_norm
                 self.global_step += 1
 
@@ -309,26 +327,38 @@ class Trainer:
                     steps_per_sec = step / elapsed_step
                     eta_sec = (num_steps - step) / max(steps_per_sec, 1e-6)
 
+                    if self.is_joint:
+                        loss_str = f"{step_losses['total']:.4f} (CE:{step_losses['ce']:.4f} CTC:{step_losses['ctc']:.4f})"
+                    else:
+                        loss_str = f"{step_losses['total']:.4f}"
+
                     logger.info(
-                        "  step %4d/%d │ loss=%.4f │ grad_norm=%.3f │ "
+                        "  step %4d/%d │ loss=%s │ grad_norm=%.3f │ "
                         "lr=%.2e │ %.1f steps/s │ ETA %ds │ VRAM %s",
-                        step, num_steps, loss, grad_norm,
+                        step, num_steps, loss_str, grad_norm,
                         lr, steps_per_sec, int(eta_sec), _fmt_vram(),
                     )
 
-                    self.writer.add_scalar("train/loss", loss, self.global_step)
+                    self.writer.add_scalar("train/loss", step_losses["total"], self.global_step)
+                    if self.is_joint:
+                        self.writer.add_scalar("train/loss_ce", step_losses["ce"], self.global_step)
+                        self.writer.add_scalar("train/loss_ctc", step_losses["ctc"], self.global_step)
                     self.writer.add_scalar("train/lr", lr, self.global_step)
                     self.writer.add_scalar("train/grad_norm", grad_norm, self.global_step)
 
                     if getattr(self, "_wandb", False):
-                        wandb.log({
-                            "train/loss": loss,
+                        log_dict = {
+                            "train/loss": step_losses["total"],
                             "train/lr": lr,
                             "train/grad_norm": grad_norm,
                             "train/vram_gb": _vram_gb() or 0.0,
-                        }, step=self.global_step)
+                        }
+                        if self.is_joint:
+                            log_dict["train/loss_ce"] = step_losses["ce"]
+                            log_dict["train/loss_ctc"] = step_losses["ctc"]
+                        wandb.log(log_dict, step=self.global_step)
 
-            avg_epoch_loss = epoch_loss / max(num_steps, 1)
+            avg_epoch_loss = epoch_losses["total"] / max(num_steps, 1)
             avg_grad_norm = epoch_grad_norm / max(num_steps, 1)
             elapsed = time.time() - t0
 
@@ -338,12 +368,16 @@ class Trainer:
             )
 
             if getattr(self, "_wandb", False):
-                wandb.log({
+                log_dict = {
                     "epoch/train_loss": avg_epoch_loss,
                     "epoch/avg_grad_norm": avg_grad_norm,
                     "epoch/elapsed_s": elapsed,
                     "epoch": epoch,
-                }, step=self.global_step)
+                }
+                if self.is_joint:
+                    log_dict["epoch/train_loss_ce"] = epoch_losses["ce"] / max(num_steps, 1)
+                    log_dict["epoch/train_loss_ctc"] = epoch_losses["ctc"] / max(num_steps, 1)
+                wandb.log(log_dict, step=self.global_step)
 
             # ── Validation ────────────────────────────────────────────────
             if epoch % tcfg.eval_interval == 0:
@@ -358,16 +392,22 @@ class Trainer:
                 loss_delta = val_loss - self.best_val_loss  # negative = improvement
 
                 self.writer.add_scalar("valid/loss", val_loss, epoch)
+                if self.is_joint:
+                    self.writer.add_scalar("valid/loss_ce", metrics["loss_ce"], epoch)
+                    self.writer.add_scalar("valid/loss_ctc", metrics["loss_ctc"], epoch)
                 self.writer.add_scalar("valid/wer", wer_val, epoch)
                 self.writer.add_scalar("valid/cer", cer_val, epoch)
 
                 if getattr(self, "_wandb", False):
-                    wandb.log({
+                    log_dict = {
                         "valid/loss": val_loss,
                         "valid/wer": wer_val,
                         "valid/cer": cer_val,
-                        "epoch": epoch,
-                    }, step=self.global_step)
+                    }
+                    if self.is_joint:
+                        log_dict["valid/loss_ce"] = metrics["loss_ce"]
+                        log_dict["valid/loss_ctc"] = metrics["loss_ctc"]
+                    wandb.log(log_dict, step=self.global_step)
 
                 logger.info(_separator("·"))
                 logger.info(

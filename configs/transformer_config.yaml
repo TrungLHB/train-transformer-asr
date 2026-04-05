@@ -18,6 +18,10 @@ decoder:
   length_penalty: 1.0
   eos_id: 1
   sos_id: 2
+  
+  # Joint CTC-Attention Training Settings
+  ctc_weight: 0.3
+  blank_id: 0
 
 training:
   decoder_loss_weight: 1.0  # weight for cross-entropy loss
