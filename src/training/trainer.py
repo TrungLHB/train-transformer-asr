@@ -410,6 +410,7 @@ class Trainer:
                     logger.info("  ✓ New best val_loss=%.4f (WER=%.4f)  →  saved to %s", val_loss, wer_val, ckpt_path)
                     
                     if getattr(self, "_wandb", False):
+                        wandb.run.summary["best_val_loss"] = val_loss
                         wandb.run.summary["best_wer"] = wer_val
                         wandb.run.summary["best_cer"] = cer_val
                         wandb.run.summary["best_epoch"] = epoch
@@ -417,7 +418,7 @@ class Trainer:
                             artifact = wandb.Artifact(
                                 name=f"best_model-{wandb.run.id}",
                                 type="model",
-                                metadata={"epoch": epoch, "wer": wer_val, "cer": cer_val},
+                                metadata={"epoch": epoch, "val_loss": val_loss, "wer": wer_val, "cer": cer_val},
                             )
                             artifact.add_file(ckpt_path)
                             wandb.log_artifact(artifact)
