@@ -139,7 +139,7 @@ class Trainer:
             logger.warning("  wandb not installed – W&B logging disabled. Run: pip install wandb")
 
         self.global_step = 0
-        self.best_valid_wer = float("inf")
+        self.best_val_loss = float("inf")
         self.early_stop_counter = 0
 
         # History for end-of-training summary
@@ -351,7 +351,7 @@ class Trainer:
                 wer_val = metrics["wer"]
                 cer_val = metrics["cer"]
                 val_loss = metrics["loss"]
-                wer_delta = wer_val - self.best_valid_wer  # negative = improvement
+                loss_delta = val_loss - self.best_val_loss  # negative = improvement
 
                 self.writer.add_scalar("valid/loss", val_loss, epoch)
                 self.writer.add_scalar("valid/wer", wer_val, epoch)
@@ -367,10 +367,9 @@ class Trainer:
 
                 logger.info(_separator("·"))
                 logger.info(
-                    "  Validation │ loss=%.4f │ WER=%.4f (%s) │ CER=%.4f │ %.1fs",
-                    val_loss, wer_val,
-                    f"{wer_delta:+.4f}" if self.best_valid_wer < float("inf") else "first",
-                    cer_val, val_elapsed,
+                    "  Validation │ loss=%.4f (%s) │ WER=%.4f │ CER=%.4f │ %.1fs",
+                    val_loss, f"{loss_delta:+.4f}" if self.best_val_loss < float("inf") else "first",
+                    wer_val, cer_val, val_elapsed,
                 )
 
                 # ── Sample predictions ────────────────────────────────────
@@ -392,8 +391,8 @@ class Trainer:
 
                 # ── Checkpoint & early stopping ───────────────────────────
                 ckpt_dir = tcfg.checkpoint_dir
-                if wer_val < self.best_valid_wer:
-                    self.best_valid_wer = wer_val
+                if val_loss < self.best_val_loss:
+                    self.best_val_loss = val_loss
                     self.early_stop_counter = 0
                     ckpt_path = os.path.join(ckpt_dir, "best_model.pt")
                     torch.save(
@@ -404,10 +403,11 @@ class Trainer:
                             "optimizer_state_dict": self.optimizer.state_dict(),
                             "wer": wer_val,
                             "cer": cer_val,
+                            "val_loss": val_loss,
                         },
                         ckpt_path,
                     )
-                    logger.info("  ✓ New best WER=%.4f  →  saved to %s", wer_val, ckpt_path)
+                    logger.info("  ✓ New best val_loss=%.4f (WER=%.4f)  →  saved to %s", val_loss, wer_val, ckpt_path)
                     
                     if getattr(self, "_wandb", False):
                         wandb.run.summary["best_wer"] = wer_val
@@ -467,7 +467,7 @@ class Trainer:
         # ── End-of-training summary ───────────────────────────────────────
         self.writer.close()
         logger.info(_separator("═"))
-        logger.info("  Training complete  │  Best WER: %.4f", self.best_valid_wer)
+        logger.info("  Training complete  │  Best val_loss: %.4f", self.best_val_loss)
         logger.info(_separator())
 
         eval_rows = [r for r in self._history if r["wer"] is not None]
