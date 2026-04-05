@@ -226,14 +226,18 @@ class Trainer:
                     # Using beam_size=1 triggers near-instant GPU greedy decoding
                     hyp_ids_list = self.model.decode(features, feature_lens, beam_size=1)
                 else:
-                    sos = torch.full(
-                        (tokens.size(0), 1), self.tokenizer.sos_id,
-                        dtype=torch.long, device=self.device
-                    )
-                    decoder_input = torch.cat([sos, tokens[:, :-1]], dim=1)
-                    logits = self.model(features, decoder_input, feature_lens, token_lens)
+                    B, max_len = tokens.size()
+                    new_tokens = torch.full((B, max_len + 1), self.tokenizer.blank_id, dtype=torch.long, device=self.device)
+                    new_tokens[:, :max_len] = tokens
+                    new_tokens.scatter_(1, token_lens.unsqueeze(1), self.tokenizer.eos_id)
+                    new_token_lens = token_lens + 1
+
+                    sos = torch.full((B, 1), self.tokenizer.sos_id, dtype=torch.long, device=self.device)
+                    decoder_input = torch.cat([sos, new_tokens[:, :-1]], dim=1)
+                    
+                    logits = self.model(features, decoder_input, feature_lens, new_token_lens)
                     logits_flat = logits.reshape(-1, logits.size(-1))
-                    targets_flat = tokens.reshape(-1)
+                    targets_flat = new_tokens.reshape(-1)
                     loss = self.ce_loss_fn(logits_flat, targets_flat)
                     total_loss += loss.item()
                     # beam_size=1 makes autoregressive generation much faster
