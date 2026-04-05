@@ -153,15 +153,20 @@ class ASRDataset(Dataset):
         self.normalize_text = normalize_text
         self.transcript_field = transcript_field
 
-        # Filter by duration up-front so __len__ is accurate
-        sample_rate = 16000  # expected after resampling
-        self.data = [
-            ex
-            for ex in hf_dataset
-            if self.min_duration
-            <= len(ex["audio"]["array"]) / ex["audio"]["sampling_rate"]
-            <= self.max_duration
-        ]
+        # Filter by duration via Hugging Face's .filter() to rely on PyArrow's
+        # disk cache. A python list comprehension would pull all uncompressed
+        # audio numpy arrays into system memory simultaneously and cause CPU OOM.
+        def _check_duration(ex):
+            if "num_samples" in ex:
+                dur = ex["num_samples"] / 16000.0  # FLEURS usually uses 16k
+            else:
+                dur = len(ex["audio"]["array"]) / ex["audio"]["sampling_rate"]
+            return self.min_duration <= dur <= self.max_duration
+
+        self.data = hf_dataset.filter(
+            _check_duration,
+            desc="Filtering audio by duration"
+        )
 
     def __len__(self) -> int:
         return len(self.data)
