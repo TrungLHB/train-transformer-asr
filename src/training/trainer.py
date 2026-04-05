@@ -168,8 +168,8 @@ class Trainer:
     # Training step
     # ------------------------------------------------------------------
 
-    def _train_step(self, batch) -> tuple[float, float]:
-        """Returns (loss, grad_norm)."""
+    def _train_step(self, batch) -> tuple[dict, float]:
+        """Returns (losses_dict, grad_norm)."""
         features, feature_lens, tokens, token_lens = batch
         features = features.to(self.device)
         feature_lens = feature_lens.to(self.device)
@@ -177,23 +177,37 @@ class Trainer:
         token_lens = token_lens.to(self.device)
 
         self.optimizer.zero_grad()
+        losses = {}
 
         with autocast(enabled=self.cfg.hardware.fp16 and self.device.type == "cuda"):
             if self.is_ctc:
                 log_probs, enc_lens = self.model(features, feature_lens)
                 loss = self.ctc_loss_fn(log_probs, tokens, enc_lens, token_lens)
+                losses = {"total": loss.item(), "ce": 0.0, "ctc": loss.item()}
             else:
-                sos = torch.full(
-                    (tokens.size(0), 1), self.tokenizer.sos_id,
-                    dtype=torch.long, device=self.device
-                )
-                decoder_input = torch.cat([sos, tokens[:, :-1]], dim=1)
-                target_lens_in = token_lens
+                B, max_len = tokens.size()
+                new_tokens = torch.full((B, max_len + 1), self.tokenizer.blank_id, dtype=torch.long, device=self.device)
+                new_tokens[:, :max_len] = tokens
+                new_tokens.scatter_(1, token_lens.unsqueeze(1), self.tokenizer.eos_id)
+                new_token_lens = token_lens + 1
 
-                logits = self.model(features, decoder_input, feature_lens, target_lens_in)
-                logits_flat = logits.reshape(-1, logits.size(-1))
-                targets_flat = tokens.reshape(-1)
-                loss = self.ce_loss_fn(logits_flat, targets_flat)
+                sos = torch.full((B, 1), self.tokenizer.sos_id, dtype=torch.long, device=self.device)
+                decoder_input = torch.cat([sos, new_tokens[:, :-1]], dim=1)
+
+                decoder_logits, ctc_log_probs, enc_lens = self.model(features, decoder_input, feature_lens, new_token_lens)
+                
+                logits_flat = decoder_logits.reshape(-1, decoder_logits.size(-1))
+                targets_flat = new_tokens.reshape(-1)
+                loss_ce = self.ce_loss_fn(logits_flat, targets_flat)
+                
+                if self.is_joint:
+                    loss_ctc = self.ctc_loss_fn(ctc_log_probs, tokens, enc_lens, token_lens)
+                    w = self.model.ctc_weight
+                    loss = (1 - w) * loss_ce + w * loss_ctc
+                    losses = {"total": loss.item(), "ce": loss_ce.item(), "ctc": loss_ctc.item()}
+                else:
+                    loss = loss_ce
+                    losses = {"total": loss.item(), "ce": loss_ce.item(), "ctc": 0.0}
 
         self.scaler.scale(loss).backward()
         self.scaler.unscale_(self.optimizer)
@@ -204,7 +218,7 @@ class Trainer:
         self.scaler.update()
         self.scheduler.step()
 
-        return loss.item(), grad_norm
+        return losses, grad_norm
 
     # ------------------------------------------------------------------
     # Evaluation
