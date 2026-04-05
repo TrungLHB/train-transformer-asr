@@ -35,14 +35,15 @@ _NUM_SAMPLES_TO_SHOW = 3
 
 def get_transformer_lr_scheduler(
     optimizer: torch.optim.Optimizer,
-    d_model: int,
     warmup_steps: int,
 ) -> LambdaLR:
-    """Noam learning rate schedule with linear warmup and inverse sqrt decay."""
+    """Noam learning rate schedule normalized so peak multiplier is 1.0."""
 
     def lr_lambda(step: int) -> float:
         step = max(step, 1)
-        return d_model ** (-0.5) * min(
+        # Peak happens at step == warmup_steps, where standard formula gives warmup_steps**(-0.5)
+        # We scale it by warmup_steps**0.5 so the peak multiplier exactly hits 1.0
+        return (warmup_steps ** 0.5) * min(
             step ** (-0.5), step * warmup_steps ** (-1.5)
         )
 
@@ -112,9 +113,8 @@ class Trainer:
             weight_decay=tcfg.weight_decay,
         )
         self.scheduler = get_transformer_lr_scheduler(
-            self.optimizer,
-            cfg.encoder.d_model,
-            tcfg.warmup_steps,
+            optimizer=self.optimizer,
+            warmup_steps=tcfg.warmup_steps,
         )
         self.scaler = GradScaler(enabled=cfg.hardware.fp16 and self.device.type == "cuda")
 
