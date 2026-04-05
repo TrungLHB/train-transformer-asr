@@ -109,6 +109,7 @@ def main():
         augment=False,
         max_duration=cfg.audio.max_duration,
         min_duration=cfg.audio.min_duration,
+        transcript_field=getattr(cfg.data, "transcript_field", "sentence"),
     )
     test_loader = DataLoader(
         test_ds,
@@ -125,7 +126,8 @@ def main():
 
     all_refs, all_hyps, all_transcripts = [], [], []
 
-    with torch.no_grad():
+    from torch.cuda.amp import autocast
+    with torch.no_grad(), autocast(enabled=cfg.hardware.fp16 and device.type == "cuda"):
         for batch in test_loader:
             features, feature_lens, tokens, token_lens = batch
             features = features.to(device)

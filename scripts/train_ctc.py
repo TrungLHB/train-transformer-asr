@@ -99,11 +99,9 @@ def main():
             trust_remote_code=True,
         )
         transcript_field = getattr(cfg.data, "transcript_field", "sentence")
-        all_texts = [
-            ex[transcript_field]
-            for split in [cfg.data.train_split, cfg.data.valid_split]
-            for ex in raw[split]
-        ]
+        all_texts = []
+        for split in [cfg.data.train_split, cfg.data.valid_split]:
+            all_texts.extend(raw[split][transcript_field])
         tokenizer = CharTokenizer().build_from_texts(all_texts)
         tokenizer.save(vocab_path)
         logger.info("Tokenizer saved to %s  (vocab_size=%d)", vocab_path, tokenizer.vocab_size)
